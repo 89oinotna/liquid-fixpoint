@@ -1011,7 +1011,7 @@ evalApp γ ctx e0 es et
          let e2' = stripPLEUnfold e'
          let e3' = simplify γ ctx (eApps e2' es2)  -- reduces a bit the equations
 
-         if not (icForceUnfold ctx) && hasUndecidedGuard e' && guardOf e' == guardOf newE' then do
+         if hasUndecidedGuard e' && guardOf e' == guardOf newE' then do
            -- Don't unfold the expression if there is an if-then-else guarding
            -- it, just to preserve the size of further rewrites.
            -- If evalIte does any modifications, though, we do unfold in order
