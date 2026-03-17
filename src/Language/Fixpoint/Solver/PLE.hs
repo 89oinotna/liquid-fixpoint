@@ -228,6 +228,8 @@ pleTrie t env = loopT env ctx0 diff0 Nothing res0 t
       , icEtaBetaFlag        = etabeta        $ ieCfg env
       , icExtensionalityFlag = extensionality $ ieCfg env
       , icLocalRewritesFlag  = localRewrites  $ ieCfg env
+      , icFullPle      = False 
+      , icForceUnfold  = False
       }
 
 loopT
@@ -390,6 +392,8 @@ data ICtx    = ICtx
                                                      -- See Note [Eta expansion].
   , icExtensionalityFlag :: Bool                     -- ^ True if the extensionality flag is turned on
   , icLocalRewritesFlag  :: Bool                     -- ^ True if the local rewrites flag is turned on
+  , icFullPle            :: Bool  -- ^ NEW: Tracks if we are allowed to unfold normally
+    , icForceUnfold        :: Bool  -- ^ NEW: Aggressive mode for unfoldNow
   }
 
 ----------------------------------------------------------------------------------------------
@@ -432,6 +436,7 @@ updCtx InstEnv{..} ctx delta cidMb
                   , icSubcId = cidMb
                   , icANFs   = anfBinds
                   , icLRWs   = mconcat $ icLRWs ctx : newLRWs
+                  , icFullPle = maybe False (\cid -> M.lookupDefault False cid (aenvExpand ieAenv)) cidMb                  
                   }
   where
     cands     = rhs:es
@@ -473,7 +478,11 @@ getCstr :: M.HashMap SubcId (SimpC a) -> SubcId -> SimpC a
 getCstr env cid = Misc.safeLookup "Instantiate.getCstr" cid env
 
 isPleCstr :: AxiomEnv -> SubcId -> SimpC a -> Bool
-isPleCstr aenv subid c = isTarget c && M.lookupDefault False subid (aenvExpand aenv)
+isPleCstr aenv subid c = isTarget c && (pleEnabled || hasUnfoldNow)
+  where
+    pleEnabled   = M.lookupDefault False subid (aenvExpand aenv)
+    -- FIX: We only print the constraint's RHS (the Expression), not the metadata
+    hasUnfoldNow = "unfoldNow" `L.isInfixOf` showpp (crhs c)
 
 type EvEqualities = S.HashSet (Expr, Expr)
 
@@ -602,6 +611,15 @@ eval γ ctx et = go
     go (ECoerc s t e)   = mapFE (ECoerc s t)  <$> go e
     go e@(EApp _ _)     =
       case splitEAppThroughECst e of
+        -- ==============================================================
+       -- NEW: Catch unfoldNow(arg) and forcefully enable PLE for `arg`
+       -- ==============================================================
+       (ef, [arg]) 
+         | EVar fName <- dropECst ef
+         , "unfoldNow" `L.isSuffixOf` symbolString fName -> 
+             -- Temporarily turn full PLE ON, but only for this specific argument!
+             eval γ (ctx { icFullPle = True, icForceUnfold = True }) et arg
+       -- ==============================================================
        (f, es) | et == RWNormal ->
           -- Just evaluate the arguments first, to give rewriting a chance to step in
           -- if necessary
@@ -956,6 +974,7 @@ evalApp γ ctx e0 es et
   , Just eq <- Map.lookup f (knAms γ)
   , length (eqArgs eq) <= length es
   = do
+       if not (icFullPle ctx) then return (Nothing, noExpand) else do
        env <- gets (seSort . evEnv)
        okFuel <- checkFuel f
        if okFuel && et /= FuncNormal then do
@@ -970,7 +989,7 @@ evalApp γ ctx e0 es et
          let e2' = stripPLEUnfold e'
          let e3' = simplify γ ctx (eApps e2' es2)  -- reduces a bit the equations
 
-         if hasUndecidedGuard e' && guardOf e' == guardOf newE' then do
+         if not (icForceUnfold ctx) && hasUndecidedGuard e' && guardOf e' == guardOf newE' then do
            -- Don't unfold the expression if there is an if-then-else guarding
            -- it, just to preserve the size of further rewrites.
            -- If evalIte does any modifications, though, we do unfold in order
@@ -1117,7 +1136,15 @@ evalIte γ ctx et (EIte i e1 e2) = do
       case b' of
         Just True -> evalIte γ ctx et e1
         Just False -> evalIte γ ctx et e2
-        _ -> return (EIte b e1 e2, expand)
+        _ -> if icForceUnfold ctx
+               then do
+                 -- HACK: We are inside unfoldNow, unroll both branches!
+                 (e1', fe1) <- eval γ ctx et e1
+                 (e2', fe2) <- eval γ ctx et e2
+                 return (EIte b e1' e2', fe1 <|> fe2 <|> expand)
+               else 
+                 -- NORMAL PLE: Keep it opaque
+                 return (EIte b e1 e2, expand)
 evalIte _ _ _ e' = return (e', noExpand)
 
 -- | Creates equations that explain how to rewrite a given constructor
