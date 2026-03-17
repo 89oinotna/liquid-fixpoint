@@ -617,8 +617,30 @@ eval γ ctx et = go
        (ef, [arg]) 
          | EVar fName <- dropECst ef
          , "unfoldNow" `L.isSuffixOf` symbolString fName -> 
-             -- Temporarily turn full PLE ON, but only for this specific argument!
-             eval γ (ctx { icFullPle = True, icForceUnfold = True }) et arg
+
+            -- 1. Turn on the aggressive flags for this scope
+             let forceCtx = ctx { icFullPle = True, icForceUnfold = True }
+             
+             -- 2. Define a local recursive PLE engine
+             let localPleLoop currentE = do
+                   -- Do an aggressive pass
+                   (nextE, fe) <- eval γ forceCtx et currentE
+                   
+                   -- Did it change?
+                   if currentE == nextE 
+                     then return (nextE, fe) -- Rock bottom reached!
+                     else do 
+                       -- It generated new functions. Register the equality for Z3...
+                       modify $ \st -> st { evNewEqualities = S.insert (currentE, nextE) (evNewEqualities st) }
+                       -- ...and loop again!
+                       (finalE, finalFe) <- localPleLoop nextE
+                       return (finalE, fe <|> finalFe)
+                       
+             -- 3. Run the engine on the wrapped argument
+             localPleLoop arg
+             
+            --  -- Temporarily turn full PLE ON, but only for this specific argument!
+            --  eval γ (ctx { icFullPle = True, icForceUnfold = True }) et arg
        -- ==============================================================
        (f, es) | et == RWNormal ->
           -- Just evaluate the arguments first, to give rewriting a chance to step in
