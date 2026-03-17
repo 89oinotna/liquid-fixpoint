@@ -617,30 +617,8 @@ eval γ ctx et = go
        (ef, [arg]) 
          | EVar fName <- dropECst ef
          , "unfoldNow" `L.isSuffixOf` symbolString fName -> 
-
-            -- 1. Turn on the aggressive flags for this scope
-             let forceCtx = ctx { icFullPle = True, icForceUnfold = True }
-             
-             -- 2. Define a local recursive PLE engine
-             let localPleLoop currentE = do
-                   -- Do an aggressive pass
-                   (nextE, fe) <- eval γ forceCtx et currentE
-                   
-                   -- Did it change?
-                   if currentE == nextE 
-                     then return (nextE, fe) -- Rock bottom reached!
-                     else do 
-                       -- It generated new functions. Register the equality for Z3...
-                       modify $ \st -> st { evNewEqualities = S.insert (currentE, nextE) (evNewEqualities st) }
-                       -- ...and loop again!
-                       (finalE, finalFe) <- localPleLoop nextE
-                       return (finalE, fe <|> finalFe)
-                       
-             -- 3. Run the engine on the wrapped argument
-             localPleLoop arg
-             
-            --  -- Temporarily turn full PLE ON, but only for this specific argument!
-            --  eval γ (ctx { icFullPle = True, icForceUnfold = True }) et arg
+             -- Temporarily turn full PLE ON, but only for this specific argument!
+             eval γ (ctx { icFullPle = True, icForceUnfold = True }) et arg
        -- ==============================================================
        (f, es) | et == RWNormal ->
           -- Just evaluate the arguments first, to give rewriting a chance to step in
@@ -1011,7 +989,7 @@ evalApp γ ctx e0 es et
          let e2' = stripPLEUnfold e'
          let e3' = simplify γ ctx (eApps e2' es2)  -- reduces a bit the equations
 
-         if not (icForceUnfold ctx) && hasUndecidedGuard e' && guardOf e' == guardOf newE' then do
+         if hasUndecidedGuard e' && guardOf e' == guardOf newE' then do
            -- Don't unfold the expression if there is an if-then-else guarding
            -- it, just to preserve the size of further rewrites.
            -- If evalIte does any modifications, though, we do unfold in order
